@@ -137,11 +137,11 @@ PLACE_SEQUENCE = {
 # =============================================================================
 
 # Index camera (0 = camera USB đầu tiên, 1 = camera thứ hai, ...)
-CAMERA_INDEX = 0
+CAMERA_INDEX = 1
 
 # Độ phân giải frame camera
-FRAME_WIDTH  = 640
-FRAME_HEIGHT = 480
+FRAME_WIDTH  = 320
+FRAME_HEIGHT = 240
 
 # Diện tích pixel tối thiểu của contour để được tính là vật thể hợp lệ.
 # Tăng nếu bị nhận diện nhầm nhiễu nhỏ; giảm nếu vật thể ở xa và nhỏ.

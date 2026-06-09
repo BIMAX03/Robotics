@@ -240,7 +240,7 @@ class RobotArmController:
             self.serial_port.flush()
             self._last_sent = values
             self.last_error = ""
-        except serial.SerialException as exc:
+        except (serial.SerialException, OSError) as exc:
             self.last_error = str(exc)
             print(f"Serial disconnected: {exc}")
             self.emergency_stop(f"Serial disconnected: {exc}")
@@ -291,9 +291,13 @@ class RobotArmController:
         if self.serial_port is None:
             return
 
-        waiting = self.serial_port.in_waiting
-        if waiting:
-            self.serial_port.read(waiting)
+        try:
+            waiting = self.serial_port.in_waiting
+            if waiting:
+                self.serial_port.read(waiting)
+        except (OSError, serial.SerialException):
+            # Port might have been disconnected
+            pass
 
 
 
