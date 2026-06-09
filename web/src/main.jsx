@@ -209,7 +209,7 @@ function App() {
       const axis = clamp(axes[joint.key] ?? 0, -1, 1);
       if (!axis) continue;
 
-      const speed = joint.key === "S5" ? 35 : joint.max > 200 ? 120 : 92;
+      const speed = joint.key === "S5" ? 20 : joint.max > 200 ? 45 : 45;
       const current = nextJoints[joint.key] ?? joint.home;
       const next = clamp(Math.round(current + axis * speed * elapsed), joint.min, joint.max);
 

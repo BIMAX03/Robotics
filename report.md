@@ -41,7 +41,7 @@ Phương pháp nghiên cứu được thực hiện theo các bước:
 Hệ thống gồm ba lớp chính:
 
 - Lớp điều khiển phần cứng: `servo/main.cpp` chạy trên Arduino, nhận dữ liệu góc và điều khiển 6 servo.
-- Lớp backend: `server/manual_control.py` cung cấp API HTTP, quản lý trạng thái robot và kịch bản động.
+- Lớp backend: `server/main.py` cung cấp API HTTP, quản lý trạng thái robot và kịch bản động.
 - Lớp xử lý ảnh: `server/vision_sorter.py` đọc camera, nhận diện màu và gọi API để phân loại.
 
 ### 5.2 Thành phần chính
@@ -64,7 +64,7 @@ Firmware xác thực dữ liệu đầu vào, ánh xạ góc hợp lệ sang xun
 
 ### 6.2 Backend Python
 
-`server/manual_control.py` định nghĩa cấu hình khớp, API trạng thái và lệnh. Hệ thống hỗ trợ:
+`server/main.py` định nghĩa cấu hình khớp, API trạng thái và lệnh. Hệ thống hỗ trợ:
 
 - `GET /api/state`
 - `POST /api/joints`
@@ -131,7 +131,7 @@ Tiểu luận chứng minh khả năng xây dựng một hệ thống robot tay 
 ## 11. Phụ lục
 
 - Mã nguồn `servo/main.cpp`.
-- Mã nguồn `server/manual_control.py`.
+- Mã nguồn `server/main.py`.
 - Mã nguồn `server/vision_sorter.py`.
 - Mã nguồn `controler.py`.
 - Hướng dẫn cài đặt `requirements.txt`.

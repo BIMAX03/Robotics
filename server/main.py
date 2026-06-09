@@ -1,20 +1,32 @@
 #!/usr/bin/env python3
 import argparse
-import json
+import sys
 import threading
 import time
-from dataclasses import asdict, dataclass
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 import serial
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-SEND_INTERVAL = 0.05
-RECONNECT_INTERVAL = 2.0
-SORT_SETTLE_DELAY = 1.0
-SORT_RAMP_INTERVAL = 0.08
-SORT_RAMP_STEP_DEGREES = 3
+# Import lớp HTTP handler và factory tạo server từ file networking riêng
+from server.api import build_http_server
+
+from server.config import (
+    DEFAULT_SERIAL_PORT,
+    DEFAULT_BAUD_RATE,
+    DEFAULT_HOST,
+    DEFAULT_HTTP_PORT,
+    SEND_INTERVAL,
+    MOTION_STEP_DEGREES,
+    RECONNECT_INTERVAL,
+    SORT_SETTLE_DELAY,
+    JOINTS_CONFIG,
+    SORT_DROPOFFS,
+)
 
 
 @dataclass(frozen=True)
@@ -27,20 +39,8 @@ class Joint:
     home: int
 
 
-JOINTS = [
-    Joint("S0", "Base", 3, 0, 360, 180),
-    Joint("S1", "Shoulder", 5, 0, 180, 90),
-    Joint("S2", "Elbow", 6, 0, 270, 135),
-    Joint("S3", "Wrist Pitch", 9, 0, 150, 75),
-    Joint("S4", "Wrist Roll", 10, 0, 180, 90),
-    Joint("S5", "Gripper", 11, 25, 70, 40),
-]
+JOINTS = [Joint(*cfg) for cfg in JOINTS_CONFIG]
 JOINT_BY_KEY = {joint.key: joint for joint in JOINTS}
-
-SORT_DROPOFFS = {
-    "blue": 360,
-    "red": 0,
-}
 
 
 def build_sort_sequence(color: str) -> List[Dict[str, int]]:
@@ -71,6 +71,7 @@ class RobotArmController:
         self._lock = threading.Lock()
         self._motion_lock = threading.Lock()
         self._target = {joint.key: joint.home for joint in JOINTS}
+        self._current = {joint.key: float(joint.home) for joint in JOINTS}
         self._last_sent = None
         self._stop_event = threading.Event()
         self._sequence_thread: Optional[threading.Thread] = None
@@ -81,6 +82,7 @@ class RobotArmController:
     def get_state(self) -> Dict[str, object]:
         with self._lock:
             joints = dict(self._target)
+            current = {key: int(round(value)) for key, value in self._current.items()}
 
         return {
             "connected": self.connected or self.mock,
@@ -92,7 +94,8 @@ class RobotArmController:
             "emergencyStopped": self.emergency_stopped,
             "sequenceName": self.sequence_name,
             "joints": joints,
-            "frame": self._format_frame(joints.values()),
+            "currentJoints": current,
+            "frame": self._format_frame(current.values()),
         }
 
     def set_joints(self, values: Dict[str, object]) -> Dict[str, int]:
@@ -179,34 +182,12 @@ class RobotArmController:
             self.emergency_stop(f"Automated sequence failed: {exc}")
 
     def _apply_sequence_step(self, values: Dict[str, int]) -> bool:
-        targets = {}
         with self._lock:
             if self.emergency_stopped:
                 raise RuntimeError("emergency stop is active")
             for key, value in values.items():
                 joint = JOINT_BY_KEY[key]
-                targets[key] = self._parse_angle(value, joint)
-
-            start = {key: self._target[key] for key in targets}
-
-        max_delta = max((abs(targets[key] - start[key]) for key in targets), default=0)
-        ramp_steps = max(1, (max_delta + SORT_RAMP_STEP_DEGREES - 1) // SORT_RAMP_STEP_DEGREES)
-
-        for step_index in range(1, ramp_steps + 1):
-            if self._stop_event.is_set():
-                return True
-
-            progress = step_index / ramp_steps
-            with self._lock:
-                if self.emergency_stopped:
-                    raise RuntimeError("emergency stop is active")
-                for key, target in targets.items():
-                    current = start[key] + (target - start[key]) * progress
-                    self._target[key] = int(round(current))
-
-            if step_index < ramp_steps and self._stop_event.wait(SORT_RAMP_INTERVAL):
-                return True
-
+                self._target[key] = self._parse_angle(value, joint)
         return False
 
     def _parse_angle(self, value: object, joint: Joint) -> int:
@@ -227,7 +208,7 @@ class RobotArmController:
                 continue
 
             with self._lock:
-                values = tuple(self._target[joint.key] for joint in JOINTS)
+                values = tuple(self._advance_motion_locked(joint.key) for joint in JOINTS)
 
             if values != self._last_sent:
                 frame = self._format_frame(values)
@@ -238,6 +219,19 @@ class RobotArmController:
                     self._send_frame(frame, values)
 
             time.sleep(SEND_INTERVAL)
+
+    def _advance_motion_locked(self, key: str) -> int:
+        target = float(self._target[key])
+        current = self._current[key]
+        delta = target - current
+
+        if abs(delta) <= MOTION_STEP_DEGREES:
+            current = target
+        else:
+            current += MOTION_STEP_DEGREES if delta > 0 else -MOTION_STEP_DEGREES
+
+        self._current[key] = current
+        return int(round(current))
 
     def _send_frame(self, frame: str, values: Iterable[int]) -> None:
         try:
@@ -302,99 +296,35 @@ class RobotArmController:
             self.serial_port.read(waiting)
 
 
-class ApiHandler(BaseHTTPRequestHandler):
-    controller: RobotArmController
-
-    def do_OPTIONS(self):
-        self._send_empty(204)
-
-    def do_GET(self):
-        if self.path == "/api/config":
-            self._send_json({"joints": [asdict(joint) for joint in JOINTS]})
-        elif self.path == "/api/state":
-            self._send_json(self.controller.get_state())
-        else:
-            self._send_json({"error": "Not found"}, status=404)
-
-    def do_POST(self):
-        try:
-            body = self._read_json()
-
-            if self.path == "/api/joints":
-                values = body.get("joints", body)
-                if not isinstance(values, dict):
-                    raise ValueError("request body must contain a joints object")
-                joints = self.controller.set_joints(values)
-                self._send_json({"ok": True, "joints": joints})
-            elif self.path == "/api/home":
-                joints = self.controller.home()
-                self._send_json({"ok": True, "joints": joints})
-            elif self.path == "/api/sort":
-                color = body.get("color")
-                if not isinstance(color, str):
-                    raise ValueError("request body must contain color")
-                self._send_json(self.controller.sort_item(color))
-            elif self.path == "/api/emergency-stop":
-                self._send_json({"ok": True, "state": self.controller.emergency_stop()})
-            else:
-                self._send_json({"error": "Not found"}, status=404)
-        except ValueError as exc:
-            self._send_json({"error": str(exc)}, status=400)
-
-    def log_message(self, format, *args):
-        return
-
-    def _read_json(self) -> Dict[str, object]:
-        length = int(self.headers.get("Content-Length", "0"))
-        if length == 0:
-            return {}
-
-        raw = self.rfile.read(length).decode("utf-8")
-        return json.loads(raw)
-
-    def _send_empty(self, status: int) -> None:
-        self.send_response(status)
-        self._send_headers()
-        self.end_headers()
-
-    def _send_json(self, payload: Dict[str, object], status: int = 200) -> None:
-        data = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self._send_headers()
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def _send_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Manual robot arm control API")
-    parser.add_argument("--serial-port", default="/dev/ttyACM0")
-    parser.add_argument("--baud-rate", type=int, default=9600)
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--http-port", type=int, default=8000)
+    parser.add_argument("--serial-port", default=DEFAULT_SERIAL_PORT)
+    parser.add_argument("--baud-rate", type=int, default=DEFAULT_BAUD_RATE)
+    parser.add_argument("--host", default=DEFAULT_HOST)
+    parser.add_argument("--http-port", type=int, default=DEFAULT_HTTP_PORT)
     parser.add_argument("--mock", action="store_true", help="run without Arduino hardware")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    controller = RobotArmController(args.serial_port, args.baud_rate, args.mock)
-    ApiHandler.controller = controller
 
-    server = ThreadingHTTPServer((args.host, args.http_port), ApiHandler)
+    # Khởi tạo controller — bắt đầu thread gửi serial và (nếu không mock) kết nối Arduino
+    controller = RobotArmController(args.serial_port, args.baud_rate, args.mock)
+
+    # Tạo HTTP server từ api.py, gắn controller và danh sách khớp vào handler
+    server = build_http_server(args.host, args.http_port, controller, JOINTS)
     print(f"API listening on http://{args.host}:{args.http_port}")
 
     try:
+        # Vòng lặp serve vô hạn — xử lý mỗi request trong thread riêng
         server.serve_forever()
     except KeyboardInterrupt:
+        # Ctrl+C → thoát sạch, không để serial port bị treo
         pass
     finally:
+        # Đảm bảo luôn đóng serial port và giải phóng socket dù có crash hay không
         controller.close()
         server.server_close()
 
